@@ -318,8 +318,9 @@ tr.empty td{text-align:center;color:var(--ink-soft);padding:30px}
     <p class="welcome">
       Ficaremos muito felizes com sua presença! Confirme abaixo se você e seus
       acompanhantes, se houver, poderão vir celebrar esse momento tão especial com a gente.
-      Para nos ajudar nessa doce espera, pedimos que cada adulto traga um pacote de fraldas —
-      nos conte também o tamanho e a quantidade que vai levar. 💕
+      Para nos ajudar nessa doce espera, pedimos com carinho que cada convidado leve
+      um pacote de fralda <b>P</b>, <b>M</b> ou <b>G</b> e, se quiser, um mimo para a
+      princesa que está chegando! 💕
     </p>
   </section>
 
@@ -350,9 +351,6 @@ tr.empty td{text-align:center;color:var(--ink-soft);padding:30px}
               <label for="tamanho">Tamanho da fralda <span class="req">*</span></label>
               <select id="tamanho" name="tamanho">
                 <option value="">Selecione…</option>
-                <option value="P">P (Pequeno)</option>
-                <option value="M">M (Médio)</option>
-                <option value="G">G (Grande)</option>
               </select>
               <span class="error-msg">Selecione um tamanho.</span>
             </div>
@@ -502,6 +500,14 @@ tr.empty td{text-align:center;color:var(--ink-soft);padding:30px}
 const API_URL   = "https://script.google.com/macros/s/AKfycbz2kBoN0MhBG_54AKvGmo5H6f7uFZzAuvlmE99TZeu5Uv3RUF9NWWmSyWB0x3fNLoAN/exec";
 const API_TOKEN = "elisa-token-2026"; // deve bater com o Apps Script
 
+/* ============ METAS DE FRALDAS ============
+   Quando um tamanho atinge a meta, ele deixa de aparecer no dropdown.
+   Ajuste os valores abaixo se quiser mudar as metas. */
+const GOALS = { P: 23, M: 28, G: 19 };
+/* Contagem atual carregada do Google Sheets (preenchida no boot).
+   Se falhar por qualquer motivo, assume 0 e mantém todas as opções. */
+let sizeCounts = { P: 0, M: 0, G: 0 };
+
 /* Senha admin: hash SHA-256 de "elisa2026" (troque se quiser outra) */
 const ADMIN_HASH = "b3b6f8f0c8f5a5f6c3d9e5b4a1f2e7c3d2b1a9e8f7c6b5a4d3e2f1c0b9a8d7e6"; // será recalculado no boot
 
@@ -529,15 +535,113 @@ function route(){
 }
 window.addEventListener('hashchange', route);
 
-/* ======= Popula select de quantidade 1..10 ======= */
-(function fillQtd(){
-  const sel = $('#qtdFraldas');
-  for(let i=1;i<=10;i++){
-    const o=document.createElement('option');
-    o.value=i; o.textContent = i + (i===1?' pacote':' pacotes');
-    sel.appendChild(o);
+/* ======= Popula selects dependentes da meta ======= */
+/**
+ * Retorna quantos pacotes AINDA cabem para determinado tamanho
+ * (0 se a meta já foi atingida).
+ */
+function remainingFor(size){
+  if(!size) return 10;
+  const target = GOALS[size] || 0;
+  const done = sizeCounts[size] || 0;
+  const left = Math.max(0, target - done);
+  return Math.min(10, left);   // no máximo 10 por convidado
+}
+
+/** Preenche o select #qtdFraldas conforme o tamanho selecionado */
+function populateQtdFraldas(){
+  const tamSel = $('#tamanho');
+  const qtdSel = $('#qtdFraldas');
+  const size   = tamSel.value;
+  const prev   = qtdSel.value;
+  const max    = remainingFor(size);
+  qtdSel.innerHTML = '<option value="">Selecione…</option>';
+  for(let i=1;i<=max;i++){
+    const o = document.createElement('option');
+    o.value = i; o.textContent = i + (i===1?' pacote':' pacotes');
+    qtdSel.appendChild(o);
   }
-})();
+  // preserva valor anterior se ainda válido
+  if(prev && +prev <= max) qtdSel.value = prev;
+}
+
+/** Preenche o dropdown de tamanho, ocultando tamanhos que atingiram a meta */
+function populateTamanhoSelect(selectEl){
+  const prev = selectEl.value;
+  selectEl.innerHTML = '<option value="">Selecione…</option>';
+  const labels = {P:'P (Pequeno)', M:'M (Médio)', G:'G (Grande)'};
+  ['P','M','G'].forEach(sz=>{
+    if(remainingFor(sz) > 0){
+      const o = document.createElement('option');
+      o.value = sz; o.textContent = labels[sz];
+      selectEl.appendChild(o);
+    }
+  });
+  // se ainda faz sentido, preserva a escolha
+  if(prev && remainingFor(prev) > 0) selectEl.value = prev;
+}
+
+/** Aplica em todos os selects de tamanho da página (titular + acompanhantes) */
+function refreshAllSizeSelects(){
+  populateTamanhoSelect($('#tamanho'));
+  populateQtdFraldas();
+  $$('.companion select[name=acomp_tam]').forEach(sel=>{
+    populateTamanhoSelect(sel);
+    // repopula qtd do acompanhante conforme tamanho
+    const wrap = sel.closest('.companion');
+    const qtdSel = $('select[name=acomp_qtd]', wrap);
+    const prev = qtdSel.value;
+    const max = remainingFor(sel.value);
+    qtdSel.innerHTML = '<option value="">Selecione…</option>';
+    for(let i=1;i<=max;i++){
+      const o = document.createElement('option');
+      o.value = i; o.textContent = i;
+      qtdSel.appendChild(o);
+    }
+    if(prev && +prev <= max) qtdSel.value = prev;
+  });
+}
+
+// popula inicialmente (assume 0 até carregar contagens)
+populateTamanhoSelect($('#tamanho'));
+populateQtdFraldas();
+// quando o tamanho do titular muda, repopula a quantidade
+on($('#tamanho'),'change', populateQtdFraldas);
+
+/* ======= Carrega contagens da planilha para aplicar metas ======= */
+async function loadSizeCounts(){
+  try{
+    const url = API_URL + '?token=' + encodeURIComponent(API_TOKEN);
+    const res = await fetch(url);
+    const data = await res.json();
+    if(data.status !== 'ok') return;
+    const counts = { P:0, M:0, G:0 };
+    (data.data||[]).forEach(r=>{
+      if(r.comparece !== 'sim') return;
+      if(counts[r.tamanho] !== undefined) counts[r.tamanho] += (+r.qtdFraldas||0);
+      let det = [];
+      try{ det = typeof r.acompanhantes==='string' ? JSON.parse(r.acompanhantes||'[]') : (r.acompanhantes||[]); }catch(e){}
+      det.forEach(a=>{
+        if(counts[a.tamanho] !== undefined) counts[a.tamanho] += (+a.qtdFraldas||0);
+      });
+    });
+    sizeCounts = counts;
+    refreshAllSizeSelects();
+    // se algum tamanho zerou, mostra aviso amigável
+    const cheios = ['P','M','G'].filter(s => remainingFor(s) === 0);
+    if(cheios.length === 3){
+      const box = document.createElement('div');
+      box.className = 'welcome';
+      box.style.cssText = 'background:#e6f5ee;border-color:#a8dcc0;color:#2f8f5e;text-align:center;margin-top:16px';
+      box.innerHTML = '🎉 <b>Meta atingida em todos os tamanhos!</b><br>Sua presença já é o maior presente. Confirme abaixo mesmo assim! 💕';
+      $('.form-card').before(box);
+    }
+  }catch(e){
+    // silencioso — mantém opções todas disponíveis
+    console.warn('Não foi possível carregar contagens:', e);
+  }
+}
+loadSizeCounts();
 </script>
 
 <script>
@@ -580,10 +684,24 @@ function renderCompanions(n){
   });
   list.innerHTML = '';
   if(!n||n<1) return;
+  const availSizes = ['P','M','G'].filter(s => remainingFor(s) > 0);
+  const sizeLabels = {P:'P (Pequeno)', M:'M (Médio)', G:'G (Grande)'};
   for(let i=0;i<n;i++){
     const d = document.createElement('div');
     d.className='companion';
     d.dataset.idx = i;
+    const tamOptions = availSizes.map(s=>{
+      // se o tamanho estava previamente escolhido e ainda cabe, mantém
+      const sel = prev[i]?.tam===s ? 'selected' : '';
+      return `<option value="${s}" ${sel}>${sizeLabels[s]}</option>`;
+    }).join('');
+    // qtd inicial baseada no tamanho previamente escolhido (ou zero se nenhum)
+    const initMax = prev[i]?.tam ? remainingFor(prev[i].tam) : 0;
+    const qtdOptions = [];
+    for(let v=1; v<=initMax; v++){
+      const sel = String(prev[i]?.qtd)===String(v) ? 'selected' : '';
+      qtdOptions.push(`<option value="${v}" ${sel}>${v}</option>`);
+    }
     d.innerHTML = `
       <h4>👤 Acompanhante ${i+1}</h4>
       <div class="field">
@@ -596,9 +714,7 @@ function renderCompanions(n){
           <label>Tamanho da fralda <span class="req">*</span></label>
           <select name="acomp_tam" required>
             <option value="">Selecione…</option>
-            <option value="P" ${prev[i]?.tam==='P'?'selected':''}>P</option>
-            <option value="M" ${prev[i]?.tam==='M'?'selected':''}>M</option>
-            <option value="G" ${prev[i]?.tam==='G'?'selected':''}>G</option>
+            ${tamOptions}
           </select>
           <span class="error-msg">Selecione o tamanho.</span>
         </div>
@@ -606,12 +722,26 @@ function renderCompanions(n){
           <label>Qtd de fraldas <span class="req">*</span></label>
           <select name="acomp_qtd" required>
             <option value="">Selecione…</option>
-            ${[1,2,3,4,5,6,7,8,9,10].map(v=>`<option value="${v}" ${String(prev[i]?.qtd)===String(v)?'selected':''}>${v}</option>`).join('')}
+            ${qtdOptions.join('')}
           </select>
           <span class="error-msg">Selecione a quantidade.</span>
         </div>
       </div>`;
     list.appendChild(d);
+    // ao mudar o tamanho, repopula a quantidade com base no restante
+    const tamSel = $('select[name=acomp_tam]', d);
+    const qtdSel = $('select[name=acomp_qtd]', d);
+    on(tamSel,'change', ()=>{
+      const max = remainingFor(tamSel.value);
+      const prevQtd = qtdSel.value;
+      qtdSel.innerHTML = '<option value="">Selecione…</option>';
+      for(let v=1; v<=max; v++){
+        const o = document.createElement('option');
+        o.value = v; o.textContent = v;
+        qtdSel.appendChild(o);
+      }
+      if(prevQtd && +prevQtd <= max) qtdSel.value = prevQtd;
+    });
     // limpar erros ao interagir
     $$('input,select', d).forEach(el => on(el,'input',()=>{
       const field = el.closest('.field'); if(field) field.classList.remove('error');
